@@ -418,7 +418,10 @@ def init_worker():
 
 
 def pcd_filter_worker(scan):
-    if args.testlist != "all":
+    if 'jax' in scan:
+        save_name = '{}.ply'.format(scan)
+    elif:
+        args.testlist != "all":
         scan_id = int(scan[4:])
         save_name = 'mvsnet{:0>3}_l3.ply'.format(scan_id)
     else:
