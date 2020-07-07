@@ -329,7 +329,7 @@ def homo_warping(src_fea, src_proj, ref_proj, depth_values):
 
 
         # homographies from ref plane (ref camera) to ref plane (src camera)
-        H = torch.matmul(H_src, torch.inverse(H_src))   # [B, Ndepth,3,3]
+        H = torch.matmul(H_src, torch.inverse(H_ref))   # [B, Ndepth,3,3]
 
         #
         y, x = torch.meshgrid([torch.arange(0, height, dtype=torch.float32, device=src_fea.device),
