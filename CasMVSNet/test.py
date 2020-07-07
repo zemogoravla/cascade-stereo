@@ -58,6 +58,11 @@ parser.add_argument('--filter_method', type=str, default='normal', choices=["gip
 parser.add_argument('--conf', type=float, default=0.9, help='prob confidence')
 parser.add_argument('--thres_view', type=int, default=5, help='threshold of num view')
 
+#AG
+parser.add_argument('--reprojection_relative_depth_max_diff', type=float, default=0.1, help='threshols for the relative depth difference in reprojection')
+parser.add_argument('--reprojection_pixel_max_distance', type=float, default=1, help='threshols for the pixel distance in reprojection')
+
+
 #filter by gimupa
 parser.add_argument('--fusibile_exe_path', type=str, default='../fusibile/fusibile')
 parser.add_argument('--prob_threshold', type=float, default='0.9')
@@ -234,9 +239,78 @@ def save_scene_depth(testlist):
     torch.cuda.empty_cache()
     gc.collect()
 
+def unproject(depth, intrinsics, extrinsics, uv=None):
+    width, height = depth.shape[1], depth.shape[0]
+
+    P_2x4 = np.matmul(intrinsics[:2,:2], extrinsics[:2,:4])
+    M = P_2x4[:2,:3]  #2x3
+    T = P_2x4[:2,3:4] #2x1
+
+    if not uv is None:
+        u = uv[0,:]
+        v = uv[1,:]
+    else:
+        # view u (cols), v (rows)
+        u, v = np.meshgrid(np.arange(0, width), np.arange(0, height))
+        u, v = u.reshape([-1]), v.reshape([-1])
+
+    z = depth.reshape([-1])
+    xy = np.linalg.inv(M[:2,:2]) @ np.vstack( ( u - T[0,0] - M[0,2]*z,
+                                                v - T[1,0] - M[1,2]*z ) )
+
+    xyz = np.vstack( (xy,z) )
+
+    return xyz
+
+def project(xyz, intrinsics, extrinsics):
+
+    P_2x4 = np.matmul(intrinsics[:2,:2], extrinsics[:2,:4])
+    M = P_2x4[:2,:3]  #2x3
+    T = P_2x4[:2,3:4] #2x1
+
+    uv = M @ xyz + T
+
+    return uv
 
 # project the reference point cloud into the source view, then project back
 def reproject_with_depth(depth_ref, intrinsics_ref, extrinsics_ref, depth_src, intrinsics_src, extrinsics_src):
+    width, height = depth_ref.shape[1], depth_ref.shape[0]
+
+
+
+    ## step1. project reference pixels to the source view
+    # reference view x, y
+    xyz_ref = unproject(depth_ref, intrinsics_ref, extrinsics_ref)
+
+    # source view x, y
+    xy_src = project(xyz_ref, intrinsics_src, extrinsics_src)
+
+
+    ## step2. reproject the source view points with source view depth estimation
+    # find the depth estimation of the source view
+    x_src = xy_src[0].reshape([height, width]).astype(np.float32)
+    y_src = xy_src[1].reshape([height, width]).astype(np.float32)
+    sampled_depth_src = cv2.remap(depth_src, x_src, y_src, interpolation=cv2.INTER_LINEAR)
+    # mask = sampled_depth_src > 0
+
+    # source 3D space
+    # NOTE that we should use sampled source-view depth_here to project back
+    xyz_src = unproject(sampled_depth_src, intrinsics_src, extrinsics_src, xy_src)
+
+    # reference 3D space
+    xyz_reprojected = xyz_src
+    # source view x, y, depth
+    depth_reprojected = xyz_reprojected[2].reshape([height, width]).astype(np.float32)
+
+    xy_reprojected = project(xyz_reprojected    ,intrinsics_ref, extrinsics_ref)
+    x_reprojected = xy_reprojected[0].reshape([height, width]).astype(np.float32)
+    y_reprojected = xy_reprojected[1].reshape([height, width]).astype(np.float32)
+
+    return depth_reprojected, x_reprojected, y_reprojected, x_src, y_src
+
+
+# project the reference point cloud into the source view, then project back
+def reproject_with_depth_original(depth_ref, intrinsics_ref, extrinsics_ref, depth_src, intrinsics_src, extrinsics_src):
     width, height = depth_ref.shape[1], depth_ref.shape[0]
     ## step1. project reference pixels to the source view
     # reference view x, y
@@ -288,7 +362,9 @@ def check_geometric_consistency(depth_ref, intrinsics_ref, extrinsics_ref, depth
     depth_diff = np.abs(depth_reprojected - depth_ref)
     relative_depth_diff = depth_diff / depth_ref
 
-    mask = np.logical_and(dist < 1, relative_depth_diff < 0.01)
+    mask = np.logical_and(dist < args.reprojection_pixel_max_distance,
+                          relative_depth_diff < args.reprojection_relative_depth_max_diff)
+
     depth_reprojected[~mask] = 0
 
     return mask, depth_reprojected, x2d_src, y2d_src
@@ -379,10 +455,14 @@ def filter_depth(pair_folder, scan_folder, out_folder, plyfilename):
         elif num_stage == 3:
             color = ref_img[valid_points]
 
-        xyz_ref = np.matmul(np.linalg.inv(ref_intrinsics),
-                            np.vstack((x, y, np.ones_like(x))) * depth)
-        xyz_world = np.matmul(np.linalg.inv(ref_extrinsics),
-                              np.vstack((xyz_ref, np.ones_like(x))))[:3]
+        # xyz_ref = np.matmul(np.linalg.inv(ref_intrinsics),
+        #                     np.vstack((x, y, np.ones_like(x))) * depth)
+        # xyz_world = np.matmul(np.linalg.inv(ref_extrinsics),
+        #                       np.vstack((xyz_ref, np.ones_like(x))))[:3]
+
+        xyz_world = unproject(depth_est_averaged, ref_intrinsics, ref_extrinsics)
+        xyz_world = xyz_world[:,valid_points.ravel()]
+
         vertexs.append(xyz_world.transpose((1, 0)))
         vertex_colors.append((color * 255).astype(np.uint8))
 
@@ -420,8 +500,7 @@ def init_worker():
 def pcd_filter_worker(scan):
     if 'jax' in scan:
         save_name = '{}.ply'.format(scan)
-    elif:
-        args.testlist != "all":
+    elif args.testlist != "all":
         scan_id = int(scan[4:])
         save_name = 'mvsnet{:0>3}_l3.ply'.format(scan_id)
     else:
