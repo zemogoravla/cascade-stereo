@@ -362,8 +362,11 @@ def check_geometric_consistency(depth_ref, intrinsics_ref, extrinsics_ref, depth
     depth_diff = np.abs(depth_reprojected - depth_ref)
     relative_depth_diff = depth_diff / depth_ref
 
+    # mask = np.logical_and(dist < args.reprojection_pixel_max_distance,
+    #                       relative_depth_diff < args.reprojection_relative_depth_max_diff)
+
     mask = np.logical_and(dist < args.reprojection_pixel_max_distance,
-                          relative_depth_diff < args.reprojection_relative_depth_max_diff)
+                          depth_diff < args.reprojection_relative_depth_max_diff)
 
     depth_reprojected[~mask] = 0
 
