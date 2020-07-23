@@ -289,8 +289,147 @@ class Hourglass3d(nn.Module):
         dconv1 = F.relu(self.dconv1(dconv2) + self.redir1(x), inplace=True)
         return dconv1
 
-
 def homo_warping(src_fea, src_proj, ref_proj, depth_values):
+    # src_fea: [B, C, H, W]
+    # src_proj: [B, 4, 4]
+    # ref_proj: [B, 4, 4]
+    # depth_values: [B, Ndepth] o [B, Ndepth, H, W]
+    # out: [B, C, Ndepth, H, W]
+    batch, channels = src_fea.shape[0], src_fea.shape[1]
+    num_depth = depth_values.shape[1]
+    height, width = src_fea.shape[2], src_fea.shape[3]
+
+    with torch.no_grad():
+
+        d = depth_values
+        if len(depth_values.shape)==2:
+            d = d.unsqueeze(2).unsqueeze(3)  # now d is [B,Ndepth,1,1]
+        # else:
+        #     d = depth_values[:, :, 0, 0]
+
+
+
+        #homographies from planes to reference plane for the reference camera
+        M_ref = ref_proj[0,:2,:3]
+        T_ref = ref_proj[0,:2, 3:]
+
+        M_src = src_proj[0, :2, :3]
+        T_src = src_proj[0, :2,  3:]
+
+        M_ref_pinv = torch.pinverse(M_ref)
+        M_src_pinv = torch.pinverse(M_src)
+
+        # direction of projection
+        # Find n as M_2x3.n=0
+        u, s, v = torch.svd(M_ref, some=False)
+        n_ref = v[:,-1:]
+
+        # inducing plane normal
+        n_ind = torch.Tensor([[0],[0],[1]]).cuda()
+        n_ind_transpose = torch.transpose(n_ind,-1,0)
+
+        n_ref_n_ind_T = torch.matmul(n_ref, n_ind_transpose)
+        n_ind_T_n_ref = torch.matmul(n_ind_transpose, n_ref)
+
+        A = torch.matmul( torch.matmul(M_src,  (torch.eye(3).cuda() - n_ref_n_ind_T/n_ind_T_n_ref)) ,  M_ref_pinv) #[2,2]
+
+        # old
+        #A = A.unsqueeze(0).unsqueeze(0).repeat(batch,num_depth,1,1)      # [B, Ndepth,2,2]
+
+        # new
+        #AA = A.unsqueeze(-1).unsqueeze(-1) # [B, Ndepth,2,2,1,1]
+
+        b1 = torch.matmul(M_src, n_ref/n_ind_T_n_ref) #[2,1]
+        b2 = - torch.matmul(A,T_ref) + T_src #[2,1]
+
+        # b = b1*d + b2   # [B, Ndepth,2,H,W]
+        b = b1.unsqueeze(0).unsqueeze(0).unsqueeze(-1).repeat(batch,num_depth,1,height,width) * \
+            d.view(batch,num_depth,1,height,width) + \
+            b2.unsqueeze(0).unsqueeze(0).unsqueeze(-1).repeat(batch,num_depth,1,height,width)
+
+        #
+        # # new
+        # bb = b.unsqueeze(-1).unsqueeze(-1) # [B, Ndepth,3,1,1,1]
+        # dd = d.unsqueeze(2).unsqueeze(3) # [B, Ndepth,1,1,H,W]
+        #
+        # # old
+        # # b = b * d
+        #
+        # # new
+        # bb = bb * dd   # [B, Ndepth,2,1,H,W]
+        #
+        # T_ref = T_ref.unsqueeze(0).unsqueeze(0).repeat(batch,num_depth,1,1)
+        # T_src = T_src.unsqueeze(0).unsqueeze(0).repeat(batch,num_depth,1,1)
+        #
+        # # new
+        # TT_ref = T_ref.unsqueeze(-1).unsqueeze(-1)  # [B, Ndepth,2,1,1,1]
+        # TT_src = T_src.unsqueeze(-1).unsqueeze(-1)  # [B, Ndepth,2,1,1,1]
+        #
+        #
+        # # bb = b - torch.matmul(A, T_ref) + T_src
+        #
+        # # new
+        # bbbb = bb - torch.matmul(AA, TT_ref) + TT_src
+        #
+        # H = torch.eye(3).cuda()
+        #
+        # #H = H.unsqueeze(0).unsqueeze(0).repeat(batch,num_depth,1,1)
+        #
+        # # new
+        # H = H.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).repeat(batch,num_depth,1,1,height,width) #[B, Ndepth,3,3,H,W]
+        #
+        # # H[:, :, 0:2, 0:2] = A
+        # # H[:, :, 0:2, 2:] = bb
+        #
+        # # new
+        # H[:, :, 0:2, 0:2,:,:] = AA
+        # H[:, :, 0:2, 2:, :,:] = bbbb
+
+        #
+        y, x = torch.meshgrid([torch.arange(0, height, dtype=torch.float32, device=src_fea.device),
+                               torch.arange(0, width, dtype=torch.float32, device=src_fea.device)])
+        y, x = y.contiguous(), x.contiguous()
+        y, x = y.view(height * width), x.view(height * width)
+
+        # xyz = torch.stack((x, y, torch.ones_like(x)))  # [3, H*W]
+        # xyz = torch.unsqueeze(xyz, 0).repeat(batch, 1, 1)  # [B, 3, H*W]
+        # xyz = xyz.unsqueeze(1).repeat(1,num_depth,1,1)  # [B, Ndepth, 3, H*W]
+
+        xy = torch.stack((x, y))  # [2, H*W]
+        xy = torch.unsqueeze(xy, 0).repeat(batch, 1, 1)  # [B, 2, H*W]
+        xy = xy.unsqueeze(1).repeat(1,num_depth,1,1)  # [B, Ndepth, 2, H*W]
+
+
+        #proj_xyz = torch.matmul(H, xyz)  # [B, Ndepth, 3, H*W]
+        #proj_xy = proj_xyz[:, :, :2, :] / proj_xyz[:, :, 2:3, :]  # [B, Ndepth, 2, H*W]
+
+        proj_xy = torch.matmul(A, xy)
+        proj_xy += b.view(batch,num_depth,2,-1)
+
+        proj_x_normalized = proj_xy[:, :, 0, :] / ((width - 1) / 2) - 1  # [B, Ndepth, H*W]
+        proj_y_normalized = proj_xy[:, :, 1, :] / ((height - 1) / 2) - 1 # [B, Ndepth, H*W]
+        proj_xy = torch.stack((proj_x_normalized, proj_y_normalized), dim=3)  # [B, Ndepth, H*W, 2]
+        grid = proj_xy
+
+    warped_src_fea = F.grid_sample(src_fea, grid.view(batch, num_depth * height, width, 2), mode='bilinear',
+                                   padding_mode='zeros')
+    warped_src_fea = warped_src_fea.view(batch, channels, num_depth, height, width)
+
+    # import matplotlib.pyplot as plt
+    # ch = 15
+    # I = src_fea[0,ch,:,:].cpu().numpy()
+    # J = warped_src_fea[0, ch, 0, :, :].cpu().numpy()
+    # K = warped_src_fea[0, ch, -1, :, :].cpu().numpy()
+    # plt.figure(1)
+    # plt.imshow(I)
+    # plt.figure(2)
+    # plt.imshow(J)
+    # plt.figure(3)
+    # plt.imshow(K)
+
+    return warped_src_fea
+
+def homo_warping_todas_las_imagenes_llevadas_al_plano_de_referencia(src_fea, src_proj, ref_proj, depth_values):
     # src_fea: [B, C, H, W]
     # src_proj: [B, 4, 4]
     # ref_proj: [B, 4, 4]
@@ -353,6 +492,9 @@ def homo_warping(src_fea, src_proj, ref_proj, depth_values):
     warped_src_fea = warped_src_fea.view(batch, channels, num_depth, height, width)
 
     return warped_src_fea
+
+
+
 
 def homo_warping_original(src_fea, src_proj, ref_proj, depth_values):
     # src_fea: [B, C, H, W]
