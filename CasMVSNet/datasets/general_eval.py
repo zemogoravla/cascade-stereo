@@ -81,7 +81,15 @@ class MVSDataset(Dataset):
     def read_img(self, filename):
         img = Image.open(filename)
         # scale 0~255 to 0~1
-        np_img = np.array(img, dtype=np.float32) / 255.
+        # np_img = np.array(img, dtype=np.float32) / 255.
+
+        if img.mode == 'F': # float32 image single channel -> scale min-max to 0-1, repeat channel x3
+            np_img = np.array(img, dtype=np.float32)
+            np_img = (np_img - np_img.min()) / (np_img.max() - np_img.min())
+            np_img = np.repeat( np_img[:,:,np.newaxis], 3, axis=2 )
+        else:
+            # scale 0~255 to 0~1
+            np_img = np.array(img, dtype=np.float32) / 255.
 
         return np_img
 
@@ -123,6 +131,10 @@ class MVSDataset(Dataset):
             img_filename = os.path.join(self.datapath, '{}/images_post/{:0>8}.jpg'.format(scan, vid))
             if not os.path.exists(img_filename):
                 img_filename = os.path.join(self.datapath, '{}/images/{:0>8}.jpg'.format(scan, vid))
+            if not os.path.exists(img_filename):
+                img_filename = os.path.join(self.datapath, '{}/images/{:0>8}.tif'.format(scan, vid))
+
+
 
             proj_mat_filename = os.path.join(self.datapath, '{}/cams/{:0>8}_cam.txt'.format(scan, vid))
 
