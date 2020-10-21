@@ -1,3 +1,4 @@
+import os, csv
 import numpy as np
 import torchvision.utils as vutils
 import torch, random
@@ -309,3 +310,202 @@ def generate_pointcloud(rgb, depth, ply_file, intr, scale=1.0):
             ''' % (len(points), "".join(points)))
     file.close()
     print("save ply, fx:{}, fy:{}, cx:{}, cy:{}".format(fx, fy, cx, cy))
+
+#--------------------------------------------------------------
+def read_vissat_idx2name(vissat_path):
+    img_idx2name_filename = os.path.join(vissat_path, 'img_idx2name.txt')
+    # idx -name dictionary
+    idx_name_dict = {}
+    with open(img_idx2name_filename, 'r') as csvfile:
+        read_csv = csv.reader(csvfile, delimiter=' ')
+        for row in read_csv:
+            image_idx = int(row[0])
+            image_name = row[1]
+            idx_name_dict[image_idx] = image_name
+
+    return idx_name_dict
+
+
+def read_vissat_ref2src(vissat_path):
+    ref2src_filename = os.path.join(vissat_path, 'ref2src.txt')
+
+    # ref src_list dictionary
+    ref_src_dict = {}
+    with open(ref2src_filename, 'r') as fp:
+        lines = fp.readlines()
+        lines = [line.strip() for line in lines]
+    for i in range(0, len(lines), 3):
+        ref_idx = lines[i].split()[-1]
+        ref_idx = int(ref_idx)
+        src_indices = lines[i + 2].split()[1:]
+        src_indices = [int(item) for item in src_indices]
+        ref_src_dict[ref_idx] = src_indices
+
+    return ref_src_dict
+
+
+# def read_vissat_proj_mats(vissat_path):
+#     proj_mats_filename = os.path.join(vissat_path, 'proj_mats.txt')
+#     proj_mats_dict = {}
+#     with open(proj_mats_filename, 'r') as csvfile:
+#         read_csv = csv.reader(csvfile, delimiter=' ')
+#         for row in read_csv:
+#             image_name = row[0]
+#             P_4x4 = np.reshape(np.array(row[1:], dtype=np.float32), (4, 4))
+#             proj_mats_dict[image_name] = P_4x4
+#
+#     return proj_mats_dict
+
+def save_vissat_proj_mat(outdir, image_name, cam, append=True):
+    proj_mats_filename = os.path.join(outdir, 'proj_mats.txt')
+    inv_proj_mats_filename = os.path.join(outdir, 'inv_proj_mats.txt')
+    mode = 'a' if append else 'w'
+    with open(proj_mats_filename, mode=mode) as fp:
+        line = '{} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g}\n'.format(
+            image_name, *(cam[0].ravel()))
+        fp.write(line)
+
+    with open(inv_proj_mats_filename, mode=mode) as fp:
+        line = '{} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g} {:.20g}\n'.format(
+            image_name, *(cam[1].ravel()))
+        fp.write(line)
+
+
+def read_vissat_proj_mats(vissat_path, prescaled=True):
+    proj_mats_filename = os.path.join(vissat_path, 'proj_mats.txt')
+    last_rows_filename = os.path.join(vissat_path, 'last_rows.txt')
+
+    proj_mats_dict = {}
+    with open(proj_mats_filename, 'r') as csvfile:
+        read_csv = csv.reader(csvfile, delimiter=' ')
+        for row in read_csv:
+            image_name = row[0]
+            P_4x4 = np.reshape(np.array(row[1:], dtype=np.float32), (4, 4))
+            proj_mats_dict[image_name] = P_4x4
+
+    if not prescaled:
+        # undo prescaling using the last_row info
+        last_rows_dict = {}
+        with open(last_rows_filename, 'r') as csvfile:
+            read_csv = csv.reader(csvfile, delimiter=' ')
+            for row in read_csv:
+                image_name = row[0]
+                last_row = np.array(row[1:], dtype=np.float32)
+                last_rows_dict[image_name] = last_row
+
+        for image_name, P_4x4 in proj_mats_dict.items():
+            last_row = last_rows_dict[image_name]
+            scale = last_row[-1] / P_4x4[-1, -1]
+            P_4x4 *= scale
+            #P_4x4[:2,:] *= .25
+            P_4x4[3,:] = np.array([0,0,0,1])
+
+    return proj_mats_dict
+
+def read_vissat_inv_proj_mats(vissat_path):
+    inv_proj_mats_filename = os.path.join(vissat_path, 'inv_proj_mats.txt')
+    inv_proj_mats_dict = {}
+    with open(inv_proj_mats_filename, 'r') as csvfile:
+        read_csv = csv.reader(csvfile, delimiter=' ')
+        for row in read_csv:
+            image_name = row[0]
+            P_4x4 = np.reshape(np.array(row[1:], dtype=np.float32), (4, 4))
+            inv_proj_mats_dict[image_name] = P_4x4
+
+    return inv_proj_mats_dict
+
+
+def read_vissat_reparam_depth(vissat_path):
+    reparam_depth_filename = os.path.join(vissat_path, 'reparam_depth.txt')
+
+    depth_min = 1e100
+    depth_max = -1e100
+    with open(reparam_depth_filename, 'r') as csvfile:
+        read_csv = csv.reader(csvfile, delimiter=' ', )
+        next(read_csv)
+        for row in read_csv:
+            print(row)
+            d1 = np.float32(row[1])
+            d2 = np.float32(row[2])
+            for row in read_csv:
+                if d1 < depth_min: depth_min = d1
+                if d2 > depth_max: depth_max = d2
+
+    return depth_min, depth_max
+
+
+def unproject_vissat(depth, proj_4x4, uv=None):
+    '''
+    :param depth: [rows, cols]
+    :param proj_4x4:
+    :param uv:  [Nx2] optional, N pixels to unproject, by default all depths are unprojected
+                Pixels are input in [col, row]
+    :return:
+    '''
+    # Note: u are cols, v are rows
+    width, height = depth.shape[1], depth.shape[0]
+    P_inv = proj_4x4[1,:,:]  # o sino np.linalg.inv(proj_4x4[0,:,:])_
+
+    if not uv is None:
+        u = uv[:,0]
+        v = uv[:,1]
+        #d = depth.reshape([-1]) #depth[np.round(v).astype(int).clip(0,depth.shape[0]-1), np.floor(u).astype(int).clip(0,depth.shape[1]-1)]
+    else:
+        # view u (cols), v (rows)
+        u, v = np.meshgrid(np.arange(0, width), np.arange(0, height), indexing='xy')
+        u, v = u.reshape([-1]), v.reshape([-1])
+
+    d = depth.ravel()
+
+    uv1m = np.vstack((u,v,np.ones_like(d),d))
+    xyzw = P_inv @ uv1m
+    xyz = ( xyzw[:3,:] / xyzw[3,:] ).T
+
+    return xyz
+
+def project_vissat(xyz, proj_4x4):
+    '''
+    :param xyz: shape [Nx3] points in 3D space
+    :param proj_4x4:
+    :return:
+        uv, shape [Nx2] pixels given as [col, row]
+    '''
+    P = proj_4x4[0,:,:]
+
+    uvst = P @ np.vstack((xyz.T, np.ones((1,xyz.shape[0]))))
+    uv = ( uvst[:2,:] / uvst[2,:] ).T
+    return uv
+
+
+def generate_pointcloud_vissat(rgb, depth, ply_file, ref_proj, scale=1.0):
+    """
+    Generate a colored point cloud in PLY format from a color and a depth image.
+
+    Input:
+    rgb_file -- filename of color image
+    depth_file -- filename of depth image
+    ply_file -- filename of ply file
+
+    """
+    xyz = unproject_vissat(depth, ref_proj)
+
+    num_points = xyz.shape[0]
+    points = np.zeros((num_points, 7))
+
+    u, v = np.meshgrid(np.arange(0, depth.shape[1]), np.arange(0, depth.shape[0]), indexing='xy')
+    points[:,:3] = xyz
+    points[:,2] /= scale
+    points[:,3:6] = rgb[v.ravel(),u.ravel()]
+
+    header = 'ply\n'
+    header += 'format ascii 1.0\n'
+    header += 'element vertex %d\n' % num_points
+    header += 'property float x\n'
+    header += 'property float y\n'
+    header += 'property float z\n'
+    header += 'property uchar red\n'
+    header += 'property uchar green\n'
+    header += 'property uchar blue\n'
+    header += 'property uchar alpha\n'
+    header += 'end_header'
+    np.savetxt(ply_file, points, fmt=['%f', '%f', '%f', '%d', '%d', '%d', '%d'], delimiter=' ', header=header, comments='')
