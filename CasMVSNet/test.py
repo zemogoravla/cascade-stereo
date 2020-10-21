@@ -75,7 +75,10 @@ args = parser.parse_args()
 print("argv:", sys.argv[1:])
 print_args(args)
 if args.testpath_single_scene:
-    args.testpath = os.path.dirname(args.testpath_single_scene)
+    if args.testlist == 'vissat':
+        args.testpath = args.testpath_single_scene # os.path.dirname(args.testpath_single_scene)
+    else:
+        args.testpath = os.path.dirname(args.testpath_single_scene)
 
 num_stage = len([int(nd) for nd in args.ndepths.split(",") if nd])
 
@@ -176,7 +179,7 @@ def save_scene_depth(testlist):
     model = nn.DataParallel(model)
     model.cuda()
     model.eval()
-
+    first_time_flag = True
     with torch.no_grad():
         for batch_idx, sample in enumerate(TestImgLoader):
             sample_cuda = tocuda(sample)
@@ -189,7 +192,8 @@ def save_scene_depth(testlist):
             cams = sample["proj_matrices"]["stage{}".format(num_stage)].numpy()
             imgs = sample["imgs"].numpy()
             print('Iter {}/{}, Time:{} Res:{}'.format(batch_idx, len(TestImgLoader), end_time - start_time, imgs[0].shape))
-
+            # if 'ref_view' in sample.keys():
+            #     print('ref_idx:{} src_indices:{}'.format(sample["ref_view"], sample["src_views"]))
             # save depth maps and confidence maps
             for filename, cam, img, depth_est, photometric_confidence in zip(filenames, cams, imgs, \
                                                             outputs["depth"], outputs["photometric_confidence"]):
@@ -215,6 +219,12 @@ def save_scene_depth(testlist):
                 img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(img_filename, img_bgr)
 
+                if testlist==['vissat']:
+                    cam_dir, cam_name = os.path.split(cam_filename)
+                    img_dir, img_name = os.path.split(img_filename)
+                    save_vissat_proj_mat(cam_dir, img_name, cam, append = not first_time_flag )
+                    first_time_flag=False
+
                 # vis
                 # print(photometric_confidence.mean(), photometric_confidence.min(), photometric_confidence.max())
                 # import matplotlib.pyplot as plt
@@ -234,8 +244,8 @@ def save_scene_depth(testlist):
                     downsample_img = img
 
                 if batch_idx % args.save_freq == 0:
-                    generate_pointcloud(downsample_img, depth_est, ply_filename, cam[1, :3, :3])
-
+                    #generate_pointcloud(downsample_img, depth_est, ply_filename, cam[1, :3, :3])
+                    generate_pointcloud_vissat(downsample_img, depth_est, ply_filename, cam)
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -272,6 +282,40 @@ def project(xyz, intrinsics, extrinsics):
 
     return uv
 
+def unproject_affine(depth, intrinsics, extrinsics, uv=None):
+    width, height = depth.shape[1], depth.shape[0]
+
+    P_2x4 = np.matmul(intrinsics[:2,:2], extrinsics[:2,:4])
+    M = P_2x4[:2,:3]  #2x3
+    T = P_2x4[:2,3:4] #2x1
+
+    if not uv is None:
+        u = uv[0,:]
+        v = uv[1,:]
+    else:
+        # view u (cols), v (rows)
+        u, v = np.meshgrid(np.arange(0, width), np.arange(0, height))
+        u, v = u.reshape([-1]), v.reshape([-1])
+
+    z = depth.reshape([-1])
+    xy = np.linalg.inv(M[:2,:2]) @ np.vstack( ( u - T[0,0] - M[0,2]*z,
+                                                v - T[1,0] - M[1,2]*z ) )
+
+    xyz = np.vstack( (xy,z) )
+
+    return xyz
+
+def project_affine(xyz, intrinsics, extrinsics):
+
+    P_2x4 = np.matmul(intrinsics[:2,:2], extrinsics[:2,:4])
+    M = P_2x4[:2,:3]  #2x3
+    T = P_2x4[:2,3:4] #2x1
+
+    uv = M @ xyz + T
+
+    return uv
+
+
 # project the reference point cloud into the source view, then project back
 def reproject_with_depth(depth_ref, intrinsics_ref, extrinsics_ref, depth_src, intrinsics_src, extrinsics_src):
     width, height = depth_ref.shape[1], depth_ref.shape[0]
@@ -297,6 +341,7 @@ def reproject_with_depth(depth_ref, intrinsics_ref, extrinsics_ref, depth_src, i
     # NOTE that we should use sampled source-view depth_here to project back
     xyz_src = unproject(sampled_depth_src, intrinsics_src, extrinsics_src, xy_src)
 
+
     # reference 3D space
     xyz_reprojected = xyz_src
     # source view x, y, depth
@@ -308,6 +353,41 @@ def reproject_with_depth(depth_ref, intrinsics_ref, extrinsics_ref, depth_src, i
 
     return depth_reprojected, x_reprojected, y_reprojected, x_src, y_src
 
+
+def reproject_with_depth_vissat(depth_ref, proj_ref, depth_src, proj_src):
+    width, height = depth_ref.shape[1], depth_ref.shape[0]
+
+    ## step1. project reference pixels to the source view
+    # reference view x, y
+    xyz_ref = unproject_vissat(depth_ref, proj_ref)
+
+    # source view x, y
+    xy_src = project_vissat(xyz_ref, proj_src)
+
+
+    ## step2. reproject the source view points with source view depth estimation
+    # find the depth estimation of the source view
+    x_src = xy_src[:,0].reshape([height, width]).astype(np.float32)
+    y_src = xy_src[:,1].reshape([height, width]).astype(np.float32)
+    sampled_depth_src = cv2.remap(depth_src, x_src, y_src, interpolation=cv2.INTER_LINEAR)
+    # mask = sampled_depth_src > 0
+
+    # source 3D space
+    # NOTE that we should use sampled source-view depth_here to project back
+    xyz_src = unproject_vissat(sampled_depth_src, proj_src, xy_src)
+
+
+    # reference 3D space
+    xyz_reprojected = xyz_src
+    # # source view x, y, depth
+    # depth_reprojected = xyz_reprojected[:,2].reshape([height, width]).astype(np.float32)
+    depth_reprojected = sampled_depth_src
+
+    xy_reprojected = project_vissat(xyz_reprojected, proj_ref)
+    x_reprojected = xy_reprojected[:,0].reshape([height, width]).astype(np.float32)
+    y_reprojected = xy_reprojected[:,1].reshape([height, width]).astype(np.float32)
+
+    return depth_reprojected, x_reprojected, y_reprojected, x_src, y_src
 
 # project the reference point cloud into the source view, then project back
 def reproject_with_depth_original(depth_ref, intrinsics_ref, extrinsics_ref, depth_src, intrinsics_src, extrinsics_src):
@@ -372,6 +452,27 @@ def check_geometric_consistency(depth_ref, intrinsics_ref, extrinsics_ref, depth
 
     return mask, depth_reprojected, x2d_src, y2d_src
 
+def check_geometric_consistency_vissat(depth_ref, proj_ref, depth_src, proj_src):
+    width, height = depth_ref.shape[1], depth_ref.shape[0]
+    x_ref, y_ref = np.meshgrid(np.arange(0, width), np.arange(0, height))
+    depth_reprojected, x2d_reprojected, y2d_reprojected, x2d_src, y2d_src = reproject_with_depth_vissat(depth_ref, proj_ref,
+                                                     depth_src, proj_src)
+    # check |p_reproj-p_1| < 1
+    dist = np.sqrt((x2d_reprojected - x_ref) ** 2 + (y2d_reprojected - y_ref) ** 2)
+
+    # check |d_reproj-d_1| / d_1 < 0.01
+    depth_diff = np.abs(depth_reprojected - depth_ref)
+    relative_depth_diff = depth_diff / depth_ref
+
+    # mask = np.logical_and(dist < args.reprojection_pixel_max_distance,
+    #                       relative_depth_diff < args.reprojection_relative_depth_max_diff)
+
+    mask = np.logical_and(dist < args.reprojection_pixel_max_distance,
+                          depth_diff < args.reprojection_relative_depth_max_diff)
+
+    depth_reprojected[~mask] = 0
+
+    return mask, depth_reprojected, x2d_src, y2d_src
 
 def filter_depth(pair_folder, scan_folder, out_folder, plyfilename):
     # the pair file
@@ -493,6 +594,143 @@ def filter_depth(pair_folder, scan_folder, out_folder, plyfilename):
     print("saving the final model to", plyfilename)
 
 
+def filter_depth_vissat(mvs_folder, scan_folder, out_folder, plyfilename):
+
+    ref_src_dict = read_vissat_ref2src(mvs_folder)
+    proj_mats_dict = read_vissat_proj_mats(os.path.join(scan_folder, 'cams'))
+    inv_proj_mats_dict = read_vissat_inv_proj_mats(os.path.join(scan_folder, 'cams'))
+
+
+    # for the final point cloud
+    vertexs = []
+    vertex_colors = []
+
+
+    nviews = len(ref_src_dict)
+
+    # for each reference view and the corresponding source views
+    for ref_view, src_views in ref_src_dict.items():
+        src_views = src_views[:args.num_view]
+
+        # # load the camera parameters
+        # ref_intrinsics, ref_extrinsics = read_camera_parameters(
+        #     os.path.join(scan_folder, 'cams/{:0>8}_cam.txt'.format(ref_view)))
+
+        
+        img_name = '{:0>8}.jpg'.format(ref_view)
+        proj_ref = np.zeros((2,4,4))
+        proj_ref[0,:,:] = proj_mats_dict[img_name]
+        proj_ref[1, :, :] = inv_proj_mats_dict[img_name]
+
+        # load the reference image
+        ref_img = read_img(os.path.join(scan_folder, 'images/{:0>8}.jpg'.format(ref_view)))
+        # load the estimated depth of the reference view
+        ref_depth_est = read_pfm(os.path.join(out_folder, 'depth_est/{:0>8}.pfm'.format(ref_view)))[0]
+        # load the photometric mask of the reference view
+        confidence = read_pfm(os.path.join(out_folder, 'confidence/{:0>8}.pfm'.format(ref_view)))[0]
+        photo_mask = confidence > args.conf
+
+        all_srcview_depth_ests = []
+        all_srcview_x = []
+        all_srcview_y = []
+        all_srcview_geomask = []
+
+        # compute the geometric mask
+        geo_mask_sum = 0
+        for src_view in src_views:
+            # # camera parameters of the source view
+            # src_intrinsics, src_extrinsics = read_camera_parameters(
+            #     os.path.join(scan_folder, 'cams/{:0>8}_cam.txt'.format(src_view)))
+
+            img_name = '{:0>8}.jpg'.format(src_view)
+            proj_src = np.zeros((2, 4, 4))
+            proj_src[0, :, :] = proj_mats_dict[img_name]
+            proj_src[1, :, :] = inv_proj_mats_dict[img_name]
+
+
+            # the estimated depth of the source view
+            src_depth_est = read_pfm(os.path.join(out_folder, 'depth_est/{:0>8}.pfm'.format(src_view)))[0]
+
+            geo_mask, depth_reprojected, x2d_src, y2d_src = check_geometric_consistency_vissat(ref_depth_est, proj_ref,
+                                                                      src_depth_est, proj_src)
+            geo_mask_sum += geo_mask.astype(np.int32)
+            all_srcview_depth_ests.append(depth_reprojected)
+            all_srcview_x.append(x2d_src)
+            all_srcview_y.append(y2d_src)
+            all_srcview_geomask.append(geo_mask)
+
+        depth_est_averaged = (sum(all_srcview_depth_ests) + ref_depth_est) / (geo_mask_sum + 1)
+        # at least 3 source views matched
+        geo_mask = geo_mask_sum >= args.thres_view
+        final_mask = np.logical_and(photo_mask, geo_mask)
+
+        os.makedirs(os.path.join(out_folder, "mask"), exist_ok=True)
+        save_mask(os.path.join(out_folder, "mask/{:0>8}_photo.png".format(ref_view)), photo_mask)
+        save_mask(os.path.join(out_folder, "mask/{:0>8}_geo.png".format(ref_view)), geo_mask)
+        save_mask(os.path.join(out_folder, "mask/{:0>8}_final.png".format(ref_view)), final_mask)
+
+        print("processing {}, ref-view{:0>2}, photo/geo/final-mask:{}/{}/{}".format(scan_folder, ref_view,
+                                                                                    photo_mask.mean(),
+                                                                                    geo_mask.mean(), final_mask.mean()))
+
+        if args.display:
+            import cv2
+            cv2.imshow('ref_img', ref_img[:, :, ::-1])
+            cv2.imshow('ref_depth', ref_depth_est / 800)
+            cv2.imshow('ref_depth * photo_mask', ref_depth_est * photo_mask.astype(np.float32) / 800)
+            cv2.imshow('ref_depth * geo_mask', ref_depth_est * geo_mask.astype(np.float32) / 800)
+            cv2.imshow('ref_depth * mask', ref_depth_est * final_mask.astype(np.float32) / 800)
+            cv2.waitKey(0)
+
+        height, width = depth_est_averaged.shape[:2]
+        x, y = np.meshgrid(np.arange(0, width), np.arange(0, height))
+        # valid_points = np.logical_and(final_mask, ~used_mask[ref_view])
+        valid_points = final_mask
+        print("valid_points", valid_points.mean())
+        x, y, depth = x[valid_points], y[valid_points], depth_est_averaged[valid_points]
+        #color = ref_img[1:-16:4, 1::4, :][valid_points]  # hardcoded for DTU dataset
+
+        if num_stage == 1:
+            color = ref_img[1::4, 1::4, :][valid_points]
+        elif num_stage == 2:
+            color = ref_img[1::2, 1::2, :][valid_points]
+        elif num_stage == 3:
+            color = ref_img[valid_points]
+
+        # xyz_ref = np.matmul(np.linalg.inv(ref_intrinsics),
+        #                     np.vstack((x, y, np.ones_like(x))) * depth)
+        # xyz_world = np.matmul(np.linalg.inv(ref_extrinsics),
+        #                       np.vstack((xyz_ref, np.ones_like(x))))[:3]
+
+        xyz_world = unproject_vissat(depth_est_averaged, proj_ref)
+        xyz_world = xyz_world[valid_points.ravel(),:]
+
+        vertexs.append(xyz_world)
+        vertex_colors.append((color * 255).astype(np.uint8))
+
+        # # set used_mask[ref_view]
+        # used_mask[ref_view][...] = True
+        # for idx, src_view in enumerate(src_views):
+        #     src_mask = np.logical_and(final_mask, all_srcview_geomask[idx])
+        #     src_y = all_srcview_y[idx].astype(np.int)
+        #     src_x = all_srcview_x[idx].astype(np.int)
+        #     used_mask[src_view][src_y[src_mask], src_x[src_mask]] = True
+
+    vertexs = np.concatenate(vertexs, axis=0)
+    vertex_colors = np.concatenate(vertex_colors, axis=0)
+    vertexs = np.array([tuple(v) for v in vertexs], dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
+    vertex_colors = np.array([tuple(v) for v in vertex_colors], dtype=[('red', 'u1'), ('green', 'u1'), ('blue', 'u1')])
+
+    vertex_all = np.empty(len(vertexs), vertexs.dtype.descr + vertex_colors.dtype.descr)
+    for prop in vertexs.dtype.names:
+        vertex_all[prop] = vertexs[prop]
+    for prop in vertex_colors.dtype.names:
+        vertex_all[prop] = vertex_colors[prop]
+
+    el = PlyElement.describe(vertex_all, 'vertex')
+    PlyData([el]).write(plyfilename)
+    print("saving the final model to", plyfilename)
+
 def init_worker():
     '''
     Catch Ctrl+C signal to termiante workers
@@ -501,7 +739,7 @@ def init_worker():
 
 
 def pcd_filter_worker(scan):
-    if 'jax' in scan:
+    if 'vissat' in scan:
         save_name = '{}.ply'.format(scan)
     elif args.testlist != "all":
         scan_id = int(scan[4:])
@@ -511,7 +749,10 @@ def pcd_filter_worker(scan):
     pair_folder = os.path.join(args.testpath, scan)
     scan_folder = os.path.join(args.outdir, scan)
     out_folder = os.path.join(args.outdir, scan)
-    filter_depth(pair_folder, scan_folder, out_folder, os.path.join(args.outdir, save_name))
+    if 'vissat' in scan:
+        filter_depth_vissat(args.testpath, scan_folder, out_folder, os.path.join(args.outdir, save_name) )
+    else:
+        filter_depth(pair_folder, scan_folder, out_folder, os.path.join(args.outdir, save_name))
 
 
 def pcd_filter(testlist, number_worker):
@@ -530,7 +771,9 @@ def pcd_filter(testlist, number_worker):
 
 if __name__ == '__main__':
 
-    if args.testlist != "all":
+    if args.testlist == 'vissat':
+        testlist = ['vissat']
+    elif args.testlist != "all":
         with open(args.testlist) as f:
             content = f.readlines()
             testlist = [line.rstrip() for line in content]
