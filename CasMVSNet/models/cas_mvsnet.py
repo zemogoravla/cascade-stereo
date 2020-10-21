@@ -27,10 +27,15 @@ class DepthNet(nn.Module):
         del ref_volume
         for src_fea, src_proj in zip(src_features, src_projs):
             #warpped features
-            src_proj_new = src_proj[:, 0].clone()
-            src_proj_new[:, :3, :4] = torch.matmul(src_proj[:, 1, :3, :3], src_proj[:, 0, :3, :4])
-            ref_proj_new = ref_proj[:, 0].clone()
-            ref_proj_new[:, :3, :4] = torch.matmul(ref_proj[:, 1, :3, :3], ref_proj[:, 0, :3, :4])
+            if False: #version original cuando se pasaba intrinsecos y extrinsecos
+                src_proj_new = src_proj[:, 0].clone()
+                src_proj_new[:, :3, :4] = torch.matmul(src_proj[:, 1, :3, :3], src_proj[:, 0, :3, :4])
+                ref_proj_new = ref_proj[:, 0].clone()
+                ref_proj_new[:, :3, :4] = torch.matmul(ref_proj[:, 1, :3, :3], ref_proj[:, 0, :3, :4])
+            else:  # si lo que llega en src_proj es la matriz de proyeccion y su inversa
+                src_proj_new = src_proj[:, 0, :4, :4].clone()
+                ref_proj_new = ref_proj[:, 0, :4, :4].clone()
+
             warped_volume = homo_warping(src_fea, src_proj_new, ref_proj_new, depth_values)
             # warped_volume = homo_warping(src_fea, src_proj[:, 2], ref_proj[:, 2], depth_values)
 
