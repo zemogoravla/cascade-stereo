@@ -321,7 +321,8 @@ def processing_single_scene(args):
         'OPENCV_FISHEYE': ['fx', 'fy', 'cx', 'cy', 'k1', 'k2', 'k3', 'k4'],
         'FULL_OPENCV': ['fx', 'fy', 'cx', 'cy', 'k1', 'k2', 'p1', 'p2', 'k3', 'k4', 'k5', 'k6'],
         'FOV': ['fx', 'fy', 'cx', 'cy', 'omega'],
-        'THIN_PRISM_FISHEYE': ['fx', 'fy', 'cx', 'cy', 'k1', 'k2', 'p1', 'p2', 'k3', 'k4', 'sx1', 'sy1']
+        'THIN_PRISM_FISHEYE': ['fx', 'fy', 'cx', 'cy', 'k1', 'k2', 'p1', 'p2', 'k3', 'k4', 'sx1', 'sy1'],
+        'PERSPECTIVE': ['fx', 'fy', 'cx', 'cy', 's']
     }
 
     # intrinsic
@@ -331,8 +332,12 @@ def processing_single_scene(args):
         if 'f' in param_type[cam.model]:
             params_dict['fx'] = params_dict['f']
             params_dict['fy'] = params_dict['f']
+        if 's' in param_type[cam.model]:
+            s = params_dict['s']
+        else:
+            s = 0
         i = np.array([
-            [params_dict['fx'], 0, params_dict['cx']],
+            [params_dict['fx'], s, params_dict['cx']],
             [0, params_dict['fy'], params_dict['cy']],
             [0, 0, 1]
         ])
