@@ -415,6 +415,7 @@ def read_vissat_inv_proj_mats(vissat_path):
     return inv_proj_mats_dict
 
 
+
 def read_vissat_reparam_depth(vissat_path):
     reparam_depth_filename = os.path.join(vissat_path, 'reparam_depth.txt')
 
@@ -433,6 +434,13 @@ def read_vissat_reparam_depth(vissat_path):
 
     return depth_min, depth_max
 
+
+def read_vissat_aoi_json(vissat_path):
+    import json
+    with open(os.path.join(vissat_path, '..', '..', 'aoi.json')) as fp:
+        aoi = json.load(fp)
+
+    return aoi
 
 def unproject_vissat(depth, proj_4x4, uv=None):
     '''
