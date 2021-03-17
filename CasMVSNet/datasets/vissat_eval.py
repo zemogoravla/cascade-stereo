@@ -73,7 +73,7 @@ class MVSDataset(Dataset):
 
     def __len__(self):
         #return len(self.metas)
-        return len(self.idx_name_dict)
+        return len(self.ref_src_dict)  # AG20200315    return len(self.idx_name_dict)
 
 
     def read_cam_file(self, filename, interval_scale):
