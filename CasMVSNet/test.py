@@ -18,6 +18,9 @@ from multiprocessing import Pool
 from functools import partial
 import signal
 
+from VisSatSatelliteStereo.coordinate_system import local_to_global
+from VisSatSatelliteStereo.lib.latlon_utm_converter import latlon_to_eastnorh
+
 cudnn.benchmark = True
 
 parser = argparse.ArgumentParser(description='Predict depth, filter, and fuse')
@@ -702,10 +705,15 @@ def filter_depth_vissat(mvs_folder, scan_folder, out_folder, plyfilename):
         # xyz_world = np.matmul(np.linalg.inv(ref_extrinsics),
         #                       np.vstack((xyz_ref, np.ones_like(x))))[:3]
 
-        xyz_world = unproject_vissat(depth_est_averaged, proj_ref)
-        xyz_world = xyz_world[valid_points.ravel(),:]
+        xyz_scene = unproject_vissat(depth_est_averaged, proj_ref)
+        xyz_scene = xyz_scene[valid_points.ravel(),:]
 
-        vertexs.append(xyz_world)
+        # convert to UTM
+        lat, lon, alt = local_to_global(os.path.join(mvs_folder,'..','..'), xyz_scene[:, 0:1], xyz_scene[:, 1:2], xyz_scene[:, 2:3])
+        east, north = latlon_to_eastnorh(lat, lon)
+        xyz_utm = np.hstack((east, north, alt))
+
+        vertexs.append(xyz_utm)
         vertex_colors.append((color * 255).astype(np.uint8))
 
         # # set used_mask[ref_view]
